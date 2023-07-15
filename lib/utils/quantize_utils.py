@@ -280,8 +280,8 @@ class QModule(nn.Module):
         return threshold
 
     def _quantize_activation(self, inputs):
-        return self._asymmetric_quantization_activation_KL(inputs)
-        # return self._asymmetric_simple_quantization(inputs)
+        # return self._asymmetric_activation_KL(inputs)
+        return self._asymmetric_simple_activation(inputs)
         if self._quantized and self._a_bit > 0:
             if self._calibrate:
                 if self._a_bit < 5:
@@ -299,6 +299,7 @@ class QModule(nn.Module):
                 self.activation_range.data = torch.tensor(
                     [estimate_activation_range], device=inputs.device
                 )
+                print(self.activation_range.item())
                 return inputs
 
             if self._trainable_activation_range:
@@ -332,12 +333,12 @@ class QModule(nn.Module):
             return inputs
 
     def _quantize_weight(self, weight):
-        return self._asymmetric_quantize_weight_KL(weight)
         if self._tanh_weight:
             weight = weight.tanh()
             weight = weight / weight.abs().max()
-
-        # return self._asymmetric_simple_quantization(weight)
+            
+        # return self._asymmetric_quantize_weight_KL(weight)
+        return self._asymmetric_simple_weights(weight)
         if self._quantized and self._w_bit > 0:
             threshold = self.weight_range.item()
             if threshold <= 0:
@@ -352,6 +353,7 @@ class QModule(nn.Module):
                 else:
                     threshold = weight.abs().max().item()
                 self.weight_range.data[0] = threshold
+                print("<<WEIGHT>>:",  self.activation_range.item())
                 return weight
 
             ori_w = weight
@@ -371,10 +373,7 @@ class QModule(nn.Module):
         else:
             return weight
 
-    def _custom_quantize_weight(self, weight):
-        if self._tanh_weight:
-            weight = weight.tanh()
-            weight = weight / weight.abs().max()
+    def _asymmetric_quantize_weight_KL(self, weight):
 
         if self._quantized and self._w_bit > 0:
             threshold = self.weight_range.item()
@@ -404,6 +403,38 @@ class QModule(nn.Module):
                 return STE.apply(ori_w, w)
         else:
             return weight
+
+
+    def _asymmetric_activation_KL(self, inputs):
+        if self._quantized and self._a_bit > 0:
+            if self._calibrate:
+                threshold = self._compute_threshold(
+                    inputs.data.cpu().numpy(), self._a_bit
+                )
+                estimate_activation_range = min(
+                    min(self.init_range, inputs.abs().max().item()), threshold
+                )
+                # print('range:', estimate_activation_range, '  shape:', inputs.shape, '  inp_abs_max:', inputs.abs().max())
+                self.activation_range.data = torch.tensor(
+                    [estimate_activation_range], device=inputs.device
+                )
+                return inputs
+
+            if self._half_wave:
+                ori_x = inputs.clamp(0.0, self.activation_range.item())
+            else:
+                ori_x = inputs.clamp(
+                    -self.activation_range.item(), self.activation_range.item()
+                )
+
+            scaling_factor = (2.0**self._a_bit - 1.0) / (inputs.max().item() - inputs.min().item())
+            zero_point = round(inputs.min().item() * scaling_factor)
+            x = ori_x.detach().clone()
+            x.mul_(scaling_factor).sub_(zero_point).round_().add_(zero_point).div_(scaling_factor)
+
+            return STE.apply(ori_x, x)
+        else:
+            return inputs
 
     def _quantize_bias(self, bias):
         if bias is not None and self._quantized and self._b_bit > 0:
@@ -440,85 +471,60 @@ class QModule(nn.Module):
             self._tanh_weight,
         )
 
-    def _asymmetric_simple_quantization(self, inputs):
+    def _asymmetric_simple_activation(self, inputs):
         if self._quantized and self._a_bit > 0:
             ori_x = inputs
-            input_min = inputs.min().item() 
-            if math.isnan(input_min):
-                return inputs
-            scaling_factor = (2.0**self._a_bit - 1.0) / (inputs.max().item() - input_min)
-            zero_point = round(input_min * scaling_factor)
-            x = ori_x.detach().clone()
-            x.mul_(scaling_factor).sub_(zero_point).round_().add_(zero_point).div_(scaling_factor)
-
-            return STE.apply(ori_x, x)
-        else:
-            return inputs
-
-    def _asymmetric_quantize_weight_KL(self, weight):
-        if self._tanh_weight:
-            weight = weight.tanh()
-            weight = weight / weight.abs().max()
-
-        if self._quantized and self._w_bit > 0:
-            threshold = self.weight_range.item()
-            if threshold <= 0:
-                threshold = weight.abs().max().item()
-                self.weight_range.data[0] = threshold
-
-            if self._calibrate:
-                threshold = self._compute_threshold(
-                    weight.data.cpu().numpy(), self._w_bit
-                )
-                self.weight_range.data[0] = threshold
-                return weight
-
-            ori_w = weight
-            scaling_factor = (2.0**self._w_bit - 1.0) / (weight.max().item() - weight.min().item())
-            zero_point = round(weight.min().item() * scaling_factor)
-            w = ori_w.detach().clone()
-            w.mul_(scaling_factor).sub_(zero_point).round_().add_(zero_point).div_(scaling_factor)
-
-
-            if self._fix_weight:
-                # w = w.detach()
-                return w.detach()
-            else:
-                # w = ori_w + w.detach() - ori_w.detach()
-                return STE.apply(ori_w, w)
-        else:
-            return weight
-            
-    def _asymmetric_quantization_activation_KL(self, inputs):
-        if self._quantized and self._a_bit > 0:
-            if self._calibrate:
-                threshold = self._compute_threshold(
-                    inputs.data.cpu().numpy(), self._a_bit
-                )
-                estimate_activation_range = min(
-                    min(self.init_range, inputs.abs().max().item()), threshold
-                )
-                # print('range:', estimate_activation_range, '  shape:', inputs.shape, '  inp_abs_max:', inputs.abs().max())
-                self.activation_range.data = torch.tensor(
-                    [estimate_activation_range], device=inputs.device
-                )
-                return inputs
-
-            if self._half_wave:
-                ori_x = inputs.clamp(0.0, self.activation_range.item())
-            else:
-                ori_x = inputs.clamp(
-                    -self.activation_range.item(), self.activation_range.item()
-                )
-
             scaling_factor = (2.0**self._a_bit - 1.0) / (inputs.max().item() - inputs.min().item())
-            zero_point = round(inputs.min().item() * scaling_factor)
+            try:
+                zero_point = round(inputs.min().item() * scaling_factor)
+            except:
+                return inputs
             x = ori_x.detach().clone()
             x.mul_(scaling_factor).sub_(zero_point).round_().add_(zero_point).div_(scaling_factor)
 
             return STE.apply(ori_x, x)
         else:
             return inputs
+        
+    def _asymmetric_simple_weights(self, inputs):
+        if self._quantized and self._w_bit > 0:
+            ori_x = inputs
+            scaling_factor = (2.0**self._w_bit - 1.0) / (inputs.max().item() - inputs.min().item())
+            try:
+                zero_point = round(inputs.min().item() * scaling_factor)
+            except:
+                return inputs
+            x = ori_x.detach().clone()
+            x.mul_(scaling_factor).sub_(zero_point).round_().add_(zero_point).div_(scaling_factor)
+
+            return STE.apply(ori_x, x)
+        else:
+            return inputs
+        
+    def _symmetric_simple_activations(self, inputs):
+        if self._quantized and self._a_bit > 0:
+            ori_x = inputs
+            scaling_factor = ((2.0**self._a_bit - 1.0) / 2) / (torch.abs(inputs).max().item())
+            x = ori_x.detach().clone()
+
+            x.mul_(scaling_factor).round_().div_(scaling_factor)
+
+            return STE.apply(ori_x, x)
+        else:
+            return inputs
+        
+    def _symmetric_simple_weights(self, inputs):
+        if self._quantized and self._w_bit > 0:
+            ori_x = inputs
+            scaling_factor = ((2.0**self._w_bit - 1.0) / 2) / (torch.abs(inputs).max().item())
+            x = ori_x.detach().clone()
+
+            x.mul_(scaling_factor).round_().div_(scaling_factor)
+
+            return STE.apply(ori_x, x)
+        else:
+            return inputs
+    
 
 
 class STE(torch.autograd.Function):
