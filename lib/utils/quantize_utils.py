@@ -474,11 +474,11 @@ class QModule(nn.Module):
     def _asymmetric_simple_activation(self, inputs):
         if self._quantized and self._a_bit > 0:
             ori_x = inputs
-            scaling_factor = (2.0**self._a_bit - 1.0) / (inputs.max().item() - inputs.min().item())
-            try:
-                zero_point = round(inputs.min().item() * scaling_factor)
-            except:
-                return inputs
+            input_min = inputs.min().item()
+            scaling_factor = (2.0**self._a_bit - 1.0) / (inputs.max().item() - input_min)
+            if math.isnan(input_min) or math.isnan(scaling_factor) or math.isinf(input_min) or math.isinf(scaling_factor):
+                return torch.zeros(*inputs.shape).cuda()
+            zero_point = round(input_min * scaling_factor)
             x = ori_x.detach().clone()
             x.mul_(scaling_factor).sub_(zero_point).round_().add_(zero_point).div_(scaling_factor)
 
@@ -489,11 +489,11 @@ class QModule(nn.Module):
     def _asymmetric_simple_weights(self, inputs):
         if self._quantized and self._w_bit > 0:
             ori_x = inputs
-            scaling_factor = (2.0**self._w_bit - 1.0) / (inputs.max().item() - inputs.min().item())
-            try:
-                zero_point = round(inputs.min().item() * scaling_factor)
-            except:
-                return inputs
+            input_min = inputs.min().item()
+            scaling_factor = (2.0**self._w_bit - 1.0) / (inputs.max().item() - input_min)
+            if math.isnan(input_min) or math.isnan(scaling_factor) or math.isinf(input_min) or math.isinf(scaling_factor):
+                return torch.zeros(*inputs.shape).cuda()
+            zero_point = round(input_min * scaling_factor)
             x = ori_x.detach().clone()
             x.mul_(scaling_factor).sub_(zero_point).round_().add_(zero_point).div_(scaling_factor)
 
