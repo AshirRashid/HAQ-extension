@@ -391,7 +391,8 @@ class QModule(nn.Module):
             ori_w = weight
             scaling_factor = (2.0**self._w_bit - 1.0) / (weight.max().item() - weight.min().item())
             zero_point = round(weight.min().item() * scaling_factor)
-            w = ori_w.detach().clone()
+            w = ori_w.clamp(-threshold, threshold)
+            # w = ori_w.detach().clone()
             w.mul_(scaling_factor).sub_(zero_point).round_().add_(zero_point).div_(scaling_factor)
 
 
@@ -477,13 +478,8 @@ class QModule(nn.Module):
             input_min = inputs.min().item()
             scaling_factor = (2.0**self._a_bit - 1.0) / (inputs.max().item() - input_min)
             if math.isnan(input_min) or math.isnan(scaling_factor) or math.isinf(input_min) or math.isinf(scaling_factor):
-                print()
                 print("ACTIVATION")
-                print(inputs.min())
-                print(input_min)
-                print(scaling_factor)
-                print(inputs)
-                exit()
+                breakpoint()
                 return torch.zeros(*inputs.shape).cuda()
             zero_point = round(input_min * scaling_factor)
             x = ori_x.detach().clone()
@@ -499,12 +495,8 @@ class QModule(nn.Module):
             input_min = inputs.min().item()
             scaling_factor = (2.0**self._w_bit - 1.0) / (inputs.max().item() - input_min)
             if math.isnan(input_min) or math.isnan(scaling_factor) or math.isinf(input_min) or math.isinf(scaling_factor):
-                print()
                 print("WEIGHT")
-                print(input_min)
-                print(scaling_factor)
-                print(inputs)
-                exit()
+                breakpoint()
                 return torch.zeros(*inputs.shape).cuda()
             zero_point = round(input_min * scaling_factor)
             x = ori_x.detach().clone()
