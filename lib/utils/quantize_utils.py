@@ -374,6 +374,10 @@ class QModule(nn.Module):
             return weight
 
     def _asymmetric_quantize_weight_KL(self, weight):
+        if self._tanh_weight:
+            weight = weight.tanh()
+            weight = weight / weight.abs().max()
+            
         if self._quantized and self._w_bit > 0:
             threshold = self.weight_range.item() #first call: -1
             if threshold <= 0:
@@ -384,7 +388,7 @@ class QModule(nn.Module):
                 if self._w_bit < 5:
                     threshold = self._compute_threshold(
                         weight.data.cpu().numpy(), self._w_bit
-                    ) #value to clamp weight in
+                    )
                 else:
                     threshold = weight.abs().max().item()
                 self.weight_range.data[0] = threshold
@@ -392,6 +396,10 @@ class QModule(nn.Module):
 
             ori_w = weight
             w = ori_w.clamp(-threshold, threshold)
+
+
+            w[torch.isnan(w)] = 0
+
             scaling_factor =  (w.max().item() - w.min().item()) / (2.0**self._w_bit - 1.0)
             
             zero_point = round(w.min().item() * scaling_factor)
@@ -429,6 +437,7 @@ class QModule(nn.Module):
                 )
                 
                 return inputs
+            
 
             if self._trainable_activation_range:
                 if self._half_wave:
@@ -449,9 +458,12 @@ class QModule(nn.Module):
                     ori_x = inputs.clamp(
                         -self.activation_range.item(), self.activation_range.item()
                     )
+
+            ori_x[torch.isnan(ori_x)] = 0
             
             scaling_factor =  (ori_x.max().item() - ori_x.min().item()) / (2.0**self._a_bit - 1.0)
             x = ori_x.detach().clone()
+
             zero_point = round(ori_x.min().item() * scaling_factor)
 
             x.div_(scaling_factor).sub_(zero_point).round_().add_(zero_point).mul_(scaling_factor)
