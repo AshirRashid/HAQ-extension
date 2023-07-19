@@ -1,4 +1,4 @@
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=2
 python -W ignore rl_quantize.py     \
  --arch qmobilenetv2                \
  --dataset imagenet100              \
@@ -13,3 +13,4 @@ python -W ignore rl_quantize.py     \
  --train_size 20000                 \
  --val_size 10000                   \
  --linear_quantization              \
+ --output ./custom_output_dir       \

@@ -1,0 +1,6 @@
+*/**/__pycache__
+/custom_output_dir
+*un~
+*.swp
+*.swo
+
