@@ -11,6 +11,7 @@ import torch.nn.init as init
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 from torch.nn.modules.utils import _single, _pair, _triple
+from abc import ABCMeta, abstractmethod
 
 from progress.bar import Bar
 from sklearn.cluster import KMeans
@@ -149,7 +150,7 @@ def kmeans_update_model(
         layer.weight.data = new_weight_data
 
 
-class QModule(nn.Module):
+class QModule(nn.Module, metaclass=ABCMeta):
     def __init__(self, w_bit=-1, a_bit=-1, half_wave=True):
         super(QModule, self).__init__()
 
@@ -170,6 +171,11 @@ class QModule(nn.Module):
         self._fix_weight = False
         self._trainable_activation_range = True
         self._calibrate = False
+
+    @property
+    @abstractmethod
+    def weight(self):
+        pass
 
     @property
     def w_bit(self):
