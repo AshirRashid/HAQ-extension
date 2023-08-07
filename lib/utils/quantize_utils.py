@@ -630,6 +630,14 @@ class QConv2d(QModule):
             self.register_parameter("bias", None)
         self.reset_parameters()
 
+    @property
+    def weight(self):
+        return self._weight
+
+    @weight.setter
+    def weight(self, weight):
+        self._weight = weight
+
     def reset_parameters(self):
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
         if self.bias is not None:
@@ -677,6 +685,14 @@ class QLinear(QModule):
         else:
             self.register_parameter("bias", None)
         self.reset_parameters()
+
+    @property
+    def weight(self):
+        return self._weight
+
+    @weight.setter
+    def weight(self, weight):
+        self._weight = weight
 
     def forward(self, inputs):
         inputs, weight, bias = self._quantize(
