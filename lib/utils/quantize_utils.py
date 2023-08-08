@@ -172,10 +172,26 @@ class QModule(nn.Module, metaclass=ABCMeta):
         self._trainable_activation_range = True
         self._calibrate = False
 
+        #magnitude, zero, direction bit for compensated dnn
+        self.EMB = 0
+        self.EZB = 0
+        self.EDB = 0
+
     @property
     @abstractmethod
     def weight(self):
         pass
+
+    @EZB.setter
+    def EZB(self, ezb):
+        self.EZB = EZB
+
+    @EMB.setter
+    def EMB(self, emb):
+        self.EMB = emb
+    @EDB.setter
+    def EDB(self, edb):
+        self.EDB = EDB
 
     @property
     def w_bit(self):
