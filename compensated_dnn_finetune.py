@@ -8,6 +8,7 @@ import math
 import random
 import shutil
 import argparse
+import copy
 
 import torch
 import torch.nn as nn
@@ -378,7 +379,36 @@ if __name__ == '__main__':
     if args.evaluate:
         print('\nEvaluation only')
         test_loss, test_acc = test(val_loader, model, criterion, start_epoch, use_cuda)
-        print(' Test Loss:  %.8f, Test Acc:  %.2f' % (test_loss, test_acc))
+        # print(' Test Loss:  %.8f, Test Acc:  %.2f' % (test_loss, test_acc))
+
+        CDNN_temp = copy.deepcopy(model)
+        max_loss = 5
+        loss, acc = test(val_loader, CDNN_temp, criterion, start_epoch, use_cuda)
+
+        while(test_acc - acc < max_loss):
+            CDNN = copy.deepcopy(CDNN_temp)
+            loss_inner, accuracy_inner_loop = test(val_loader, CDNN, criterion, start_epoch, use_cuda)
+            while(test_acc - accuracy_inner_loop < max_loss):
+                CDNN = copy.deepcopy(CDNN_temp)
+                pass #decrement FB when implemented
+            
+            for i, m in enumerate(CDNN_temp.modules()):
+                if type(m) in [QConv2d, QLinear]:
+                    m.EMB = m.EMB + 1
+
+    
+        EZB_threshold = 0.2 #random value?
+        loss, acc = test(val_loader, CDNN_temp, criterion, start_epoch, use_cuda)
+
+        while(test_acc - acc < max_loss):
+            CDNN = copy.deepcopy(CDNN_temp)
+            EZB_threshold += EZB_threshold
+            pass #increase error sparsity
+
+        #final accuracy
+
+        loss, acc = test(val_loader, CDNN, criterion, start_epoch, use_cuda)
+
         exit()
 
     # Train and val
