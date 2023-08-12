@@ -7,6 +7,7 @@ import random
 import shutil
 import argparse
 from copy import deepcopy
+from typing import Iterator
 
 import torch
 import torch.nn as nn
@@ -14,13 +15,12 @@ import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.optim as optim
 import torchvision.models as models
-from torch.utils.data import DataLoader
 import models as customized_models
 
 from lib.utils.utils import Logger, AverageMeter, accuracy
 from lib.utils.data_utils import get_dataset
 from progress.bar import Bar
-from lib.utils.quantize_utils import quantize_model, kmeans_update_model, QConv2d, QLinear, calibrate
+from lib.utils.quantize_utils import QConv2d, QLinear, QModule
 
 
 # Models
@@ -172,6 +172,11 @@ def test(val_loader, model, criterion, epoch=0, use_cuda=True):
     print(top1.avg)
     return losses.avg, top1.avg
 
+def qlayers(dnn: torch.nn.Module) -> Iterator[QModule]:
+    """Returns a generator yielding all modules in dnn of type QLinear or QConv2d (i.e. quantizeable layers)
+    """
+    return (module for module in dnn.modules() if type(module) in [QConv2d, QLinear])
+
 def evaluate_accuracy(dnn: torch.nn.Module) -> float:
     _, accuracy: float = test(val_loader, dnn, criterion)
     return accuracy
@@ -186,10 +191,9 @@ def identify_ib_and_fb_for_each_layer(non_quantized_dnn: torch.nn.Module, start_
     """Sets the IB (integer bits) and FB (fractional bits) attributes of the model.
     This change quantizes the model since a fixed point representation is used to represent weights and activations.
     """
-    for module in non_quantized_dnn.modules():
-        if type(module) in [QConv2d, QLinear]:
-            module.ib = torch.full(module.weights.shape, 4)
-            module.fb = torch.full(module.weights.shape, 4)
+    for qlayer in qlayers(non_quantized_dnn):
+        qlayer.ib = torch.full(qlayer.weight.shape, 4)
+        qlayer.fb = torch.full(qlayer.weight.shape, 4)
     return non_quantized_dnn
 
 def set_default_ezb_thresh(c_dnn: torch.nn.Module) -> float:
@@ -213,20 +217,17 @@ def fpec_opt(self, non_quantized_dnn: torch.nn.Module, max_loss: float) -> torch
     c_dnn: torch.nn.Module = identify_ib_and_fb_for_each_layer(non_quantized_dnn, stats) # Compensated dnn
 
     # set emb = 0 for all weights
-    for module in non_quantized_dnn.modules():
-        if type(module) in [QConv2d, QLinear]:
-            module.emb = torch.zeros(module.weights.shape)
+    for qlayer in qlayers(non_quantized_dnn):
+        qlayer.emb = torch.zeros(qlayer.weight.shape)
     c_dnn_temp: torch.nn.Module = deepcopy(c_dnn)
     while (accuracy - evaluate_accuracy(c_dnn_temp)) < max_loss:
         c_dnn = deepcopy(c_dnn_temp)
         while (accuracy - evaluate_accuracy(c_dnn_temp)) < max_loss:
             c_dnn = deepcopy(c_dnn_temp)
-            for module in non_quantized_dnn.modules():
-                if type(module) in [QConv2d, QLinear]:
-                    module.fb -= 1
-        for module in non_quantized_dnn.modules():
-            if type(module) in [QConv2d, QLinear]:
-                module.emb += 1
+            for qlayer in qlayers(non_quantized_dnn):
+                qlayer.fb -= 1
+        for qlayer in qlayers(non_quantized_dnn):
+            qlayer.emb += 1
     
     ezb_thresh: float = set_default_ezb_thresh(c_dnn)
     while (accuracy - evaluate_accuracy(c_dnn_temp))< max_loss:
