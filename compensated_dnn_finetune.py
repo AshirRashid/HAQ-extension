@@ -1,6 +1,4 @@
-# Code for "[HAQ: Hardware-Aware Automated Quantization with Mixed Precision"
-# Kuan Wang*, Zhijian Liu*, Yujun Lin*, Ji Lin, Song Han
-# {kuanwang, zhijian, yujunlin, jilin, songhan}@mit.edu
+# Implementation for the FPEC-Opt in Compensated DNN paper
 
 import os
 import time
@@ -8,7 +6,7 @@ import math
 import random
 import shutil
 import argparse
-import copy
+from copy import deepcopy
 
 import torch
 import torch.nn as nn
@@ -16,6 +14,7 @@ import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.optim as optim
 import torchvision.models as models
+from torch.utils.data import DataLoader
 import models as customized_models
 
 from lib.utils.utils import Logger, AverageMeter, accuracy
@@ -116,87 +115,7 @@ if use_cuda:
 best_acc = 0  # best test accuracy
 
 
-def load_my_state_dict(model, state_dict):
-    model_state = model.state_dict()
-    for name, param in state_dict.items():
-        if name not in model_state:
-            continue
-        param_data = param.data
-        if model_state[name].shape == param_data.shape:
-            # print("load%s"%name)
-            model_state[name].copy_(param_data)
-
-
-def train(train_loader, model, criterion, optimizer, epoch, use_cuda):
-    # switch to train mode
-    model.train()
-
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
-    losses = AverageMeter()
-    top1 = AverageMeter()
-    top5 = AverageMeter()
-    end = time.time()
-
-    bar = Bar('Processing', max=len(train_loader))
-    for batch_idx, (inputs, targets) in enumerate(train_loader):
-        # measure data loading time
-        data_time.update(time.time() - end)
-
-        if use_cuda:
-            inputs, targets = inputs.cuda(), targets.cuda()
-        inputs, targets = torch.autograd.Variable(inputs), torch.autograd.Variable(targets)
-
-        # compute output
-        outputs = model(inputs)
-        loss = criterion(outputs, targets)
-
-        # measure accuracy and record loss
-        prec1, prec5 = accuracy(outputs.data, targets.data, topk=(1, 5))
-        losses.update(loss.item(), inputs.size(0))
-        top1.update(prec1.item(), inputs.size(0))
-        top5.update(prec5.item(), inputs.size(0))
-
-        # compute gradient
-        optimizer.zero_grad()
-        if args.half:
-            with apex.amp.scale_loss(loss, optimizer) as scaled_loss:
-                scaled_loss.backward()
-            # with amp_handle.scale_loss(loss, optimizer) as scaled_loss:
-            #     scaled_loss.backward()
-        else:
-            loss.backward()
-        # do SGD step
-        optimizer.step()
-
-        if not args.linear_quantization:
-            kmeans_update_model(model, quantizable_idx, centroid_label_dict, free_high_bit=args.free_high_bit)
-
-        # measure elapsed time
-        batch_time.update(time.time() - end)
-        end = time.time()
-
-        # plot progress
-        if batch_idx % 1 == 0:
-            bar.suffix = \
-                '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | ' \
-                'Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
-                    batch=batch_idx + 1,
-                    size=len(train_loader),
-                    data=data_time.val,
-                    bt=batch_time.val,
-                    total=bar.elapsed_td,
-                    eta=bar.eta_td,
-                    loss=losses.avg,
-                    top1=top1.avg,
-                    top5=top5.avg,
-                )
-            bar.next()
-    bar.finish()
-    return losses.avg, top1.avg
-
-
-def test(val_loader, model, criterion, epoch, use_cuda):
+def test(val_loader, model, criterion, epoch=0, use_cuda=True):
     global best_acc
 
     batch_time = AverageMeter()
@@ -250,32 +169,72 @@ def test(val_loader, model, criterion, epoch, use_cuda):
                         )
                 bar.next()
         bar.finish()
+    print(top1.avg)
     return losses.avg, top1.avg
 
+def evaluate_accuracy(dnn: torch.nn.Module) -> float:
+    _, accuracy: float = test(val_loader, dnn, criterion)
+    return accuracy
 
-def save_checkpoint(state, is_best, checkpoint='checkpoint', filename='checkpoint.pth.tar'):
-    filepath = os.path.join(checkpoint, filename)
-    torch.save(state, filepath)
-    if is_best:
-        shutil.copyfile(filepath, os.path.join(checkpoint, 'model_best.pth.tar'))
+def get_stats_for_each_layer(non_quantized_dnn: torch.nn.Module) -> dict:
+    """Get stats for each layer.
+    The equivalent of getStatsForEachLayer in the Compensated DNN paper.
+    """
+    return dict()
 
+def identify_ib_and_fb_for_each_layer(non_quantized_dnn: torch.nn.Module, start_dict: dict) -> torch.nn.Module:
+    """Sets the IB (integer bits) and FB (fractional bits) attributes of the model.
+    This change quantizes the model since a fixed point representation is used to represent weights and activations.
+    """
+    for module in non_quantized_dnn.modules():
+        if type(module) in [QConv2d, QLinear]:
+            module.ib = torch.full(module.weights.shape, 4)
+            module.fb = torch.full(module.weights.shape, 4)
+    return non_quantized_dnn
 
-def adjust_learning_rate(optimizer, epoch):
-    global lr_current
-    global best_acc
-    if epoch < args.warmup_epoch:
-        lr_current = state['lr']*args.gamma
-    elif args.lr_type == 'cos':
-        # cos
-        lr_current = 0.5 * args.lr * (1 + math.cos(math.pi * epoch / args.epochs))
-    elif args.lr_type == 'exp':
-        step = 1
-        decay = args.gamma
-        lr_current = args.lr * (decay ** (epoch // step))
-    elif epoch in args.schedule:
-        lr_current *= args.gamma
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr_current
+def set_default_ezb_thresh(c_dnn: torch.nn.Module) -> float:
+    """ezb threshold to be determined using the emb tensors for each layer.
+    The emb tensors for each layer can be accessed my iterating through c_dnn.modules()
+    """
+    return 0.
+
+def increase_error_sparsity(ezb_thresh, c_dnn) -> torch.nn.Module:
+    """Set the ezb for each layer to 1 or 0 depending on the ezb_thresh
+    """
+    return c_dnn
+
+def fpec_opt(self, non_quantized_dnn: torch.nn.Module, max_loss: float) -> torch.nn.Module:
+    # To check for quantizable layers, iterate over model.modules() and check if the type is QConv2d or QLinear.
+    # TODO: extend the implementation to also work for activations in addition to weights
+    EZB_THRESH_INC = 0.2 # ezb threshold increment
+
+    accuracy: float = evaluate_accuracy(non_quantized_dnn)
+    stats: dict = self.get_stats_for_each_layer(self.weight)
+    c_dnn: torch.nn.Module = identify_ib_and_fb_for_each_layer(non_quantized_dnn, stats) # Compensated dnn
+
+    # set emb = 0 for all weights
+    for module in non_quantized_dnn.modules():
+        if type(module) in [QConv2d, QLinear]:
+            module.emb = torch.zeros(module.weights.shape)
+    c_dnn_temp: torch.nn.Module = deepcopy(c_dnn)
+    while (accuracy - evaluate_accuracy(c_dnn_temp)) < max_loss:
+        c_dnn = deepcopy(c_dnn_temp)
+        while (accuracy - evaluate_accuracy(c_dnn_temp)) < max_loss:
+            c_dnn = deepcopy(c_dnn_temp)
+            for module in non_quantized_dnn.modules():
+                if type(module) in [QConv2d, QLinear]:
+                    module.fb -= 1
+        for module in non_quantized_dnn.modules():
+            if type(module) in [QConv2d, QLinear]:
+                module.emb += 1
+    
+    ezb_thresh: float = set_default_ezb_thresh(c_dnn)
+    while (accuracy - evaluate_accuracy(c_dnn_temp))< max_loss:
+        c_dnn = deepcopy(c_dnn_temp)
+        ezb_thresh += EZB_THRESH_INC
+        c_dnn_temp = increase_error_sparsity(ezb_thresh, c_dnn_temp)
+
+    return c_dnn
 
 
 if __name__ == '__main__':
@@ -295,152 +254,8 @@ if __name__ == '__main__':
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda()
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-
-    # use HalfTensor
-    if args.half:
-        try:
-            import apex
-        except ImportError:
-            raise ImportError("Please install apex from https://github.com/NVIDIA/apex")
-        model.cuda()
-        model, optimizer = apex.amp.initialize(model, optimizer, opt_level=args.half_type)
-
-    if args.linear_quantization:
-        quantizable_idx = []
-        for i, m in enumerate(model.modules()):
-            if type(m) in [QConv2d, QLinear]:
-                quantizable_idx.append(i)
-        # print(model)
-        print(quantizable_idx)
-
-        if 'mobilenetv2' in args.arch:
-            strategy = [[9, 9]]*53
-        else:
-            raise NotImplementedError
-
-        print(strategy)
-        quantize_layer_bit_dict = {n: b for n, b in zip(quantizable_idx, strategy)}
-        for i, layer in enumerate(model.modules()):
-            if i not in quantizable_idx:
-                continue
-            else:
-                layer.w_bit = quantize_layer_bit_dict[i][0]
-                layer.a_bit = quantize_layer_bit_dict[i][1]
-        model = model.cuda()
-        model = calibrate(model, train_loader)
-    else:
-        quantizable_idx = []
-        for i, m in enumerate(model.modules()):
-            if type(m) in [nn.Conv2d, nn.Linear]:
-                quantizable_idx.append(i)
-        print(quantizable_idx)
-
-        if args.arch.startswith('resnet50'):
-            # resnet50 ratio 10%
-            strategy = [9]*54
-        else:
-            # you can put your own strategy here
-            raise NotImplementedError
-        print('strategy for ' + args.arch + ': ', strategy)
-
-        assert len(quantizable_idx) == len(strategy), \
-            'You should provide the same number of bit setting as layer list for weight quantization!'
-        centroid_label_dict = quantize_model(model, quantizable_idx, strategy, mode='cpu', quantize_bias=False,
-                                             centroids_init='k-means++', max_iter=50)
-
-    if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
-        model.features = torch.nn.DataParallel(model.features)
-        model = model.cuda()
-    else:
-        model = torch.nn.DataParallel(model).cuda()
-
-    # Resume
-    title = 'ImageNet-' + args.arch
-    if args.resume:
-        # Load checkpoint.
-        print('==> Resuming from checkpoint..')
-        assert os.path.isfile(args.resume), 'Error: no checkpoint directory found!'
-        args.checkpoint = os.path.dirname(args.resume)
-        checkpoint = torch.load(args.resume)
-        best_acc = checkpoint['best_acc']
-        print(best_acc)
-        start_epoch = checkpoint['epoch']
-        model.load_state_dict(checkpoint['state_dict'], strict=False)
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        if os.path.isfile(os.path.join(args.checkpoint, 'log.txt')):
-            logger = Logger(os.path.join(args.checkpoint, 'log.txt'), title=title, resume=True)
-        else:
-            logger = Logger(os.path.join(args.checkpoint, 'log.txt'), title=title)
-            logger.set_names(['Learning Rate', 'Train Loss', 'Valid Loss', 'Train Acc.', 'Valid Acc.'])
-    else:
-        logger = Logger(os.path.join(args.checkpoint, 'log.txt'), title=title)
-        logger.set_names(['Learning Rate', 'Train Loss', 'Valid Loss', 'Train Acc.', 'Valid Acc.'])
+    model = torch.nn.DataParallel(model).cuda()
 
     if args.evaluate:
-        print('\nEvaluation only')
-        test_loss, test_acc = test(val_loader, model, criterion, start_epoch, use_cuda)
-        # print(' Test Loss:  %.8f, Test Acc:  %.2f' % (test_loss, test_acc))
-
-        CDNN_temp = copy.deepcopy(model)
-        max_loss = 5
-        loss, acc = test(val_loader, CDNN_temp, criterion, start_epoch, use_cuda)
-
-        while(test_acc - acc < max_loss):
-            CDNN = copy.deepcopy(CDNN_temp)
-            loss_inner, accuracy_inner_loop = test(val_loader, CDNN, criterion, start_epoch, use_cuda)
-            while(test_acc - accuracy_inner_loop < max_loss):
-                CDNN = copy.deepcopy(CDNN_temp)
-                pass #decrement FB when implemented
-            
-            for i, m in enumerate(CDNN_temp.modules()):
-                if type(m) in [QConv2d, QLinear]:
-                    m.EMB = m.EMB + 1
-
-    
-        EZB_threshold = 0.2 #random value?
-        loss, acc = test(val_loader, CDNN_temp, criterion, start_epoch, use_cuda)
-
-        while(test_acc - acc < max_loss):
-            CDNN = copy.deepcopy(CDNN_temp)
-            EZB_threshold += EZB_threshold
-            pass #increase error sparsity
-
-        #final accuracy
-
-        loss, acc = test(val_loader, CDNN, criterion, start_epoch, use_cuda)
-
-        exit()
-
-    # Train and val
-    for epoch in range(start_epoch, args.epochs):
-        adjust_learning_rate(optimizer, epoch)
-        # if args.free_high_bit and args.epochs - epoch < args.epochs // 10:
-        if args.free_high_bit and epoch == args.epochs - 1 and (not args.linear_quantization):
-            # quantize the high bit layers only at last epoch to save time
-            centroid_label_dict = quantize_model(model, quantizable_idx, strategy, mode='cpu', quantize_bias=False,
-                                                 centroids_init='k-means++', max_iter=50, free_high_bit=False)
-
-        print('\nEpoch: [%d | %d] LR: %f' % (epoch + 1, args.epochs, lr_current))
-
-        train_loss, train_acc = train(train_loader, model, criterion, optimizer, epoch, use_cuda)
-        test_loss, test_acc = test(val_loader, model, criterion, epoch, use_cuda)
-
-        # append logger file
-        logger.append([lr_current, train_loss, test_loss, train_acc, test_acc])
-
-        # save model
-        is_best = test_acc > best_acc
-        best_acc = max(test_acc, best_acc)
-        save_checkpoint({
-                'epoch': epoch + 1,
-                'state_dict': model.state_dict(),
-                'acc': test_acc,
-                'best_acc': best_acc,
-                'optimizer' : optimizer.state_dict(),
-            }, is_best, checkpoint=args.checkpoint)
-
-    logger.close()
-
-    print('Best acc:')
-    print(best_acc)
-
+        print('\nEvaluation only (Compensated DNN)')
+        fpec_opt(model, 5.)
