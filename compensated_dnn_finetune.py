@@ -204,7 +204,12 @@ def set_default_ezb_thresh(c_dnn: torch.nn.Module) -> float:
 
 def increase_error_sparsity(ezb_thresh, c_dnn) -> torch.nn.Module:
     """Set the ezb for each layer to 1 or 0 depending on the ezb_thresh
+    If the estimated error is greater than ezb_thresh, ezb is set to 1 (ignoring this error to save error compensation computation)
+    The error is ignored by setting it to 0 so it is not taken into account
     """
+    for qlayer in qlayers(c_dnn):
+        error_est = torch.pow(-1, qlayer.edb) * torch.pow(2, -qlayer.fb - 1 - qlayer.emb) # formula from compensated dnn paper section 4.2
+        qlayer.error_est = torch.where(error_est < ezb_thresh, 0, error_est) # error_est is to be used in the forward function later
     return c_dnn
 
 def fpec_opt(self, non_quantized_dnn: torch.nn.Module, max_loss: float) -> torch.nn.Module:
