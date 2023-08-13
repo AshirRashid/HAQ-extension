@@ -172,11 +172,68 @@ class QModule(nn.Module, metaclass=ABCMeta):
         self._trainable_activation_range = True
         self._calibrate = False
 
+        self._EZB_weight = 0
+        self._EMB_weight = 0
+        self._EDB_weight = 0
+
+        self._EZB_activation = 0
+        self._EMB_activation = 0
+        self._EDB_activation = 0
+
     @property
     @abstractmethod
     def weight(self):
         pass
 
+    @property
+    def EZB_weight(self):
+        return self._EZB_weight
+
+    
+    @EZB_weight.setter
+    def EZB_weight(self, EZB_weight):
+        self._EZB_weight = EZB_weight
+    
+    @property
+    def EMB_weight(self):
+        return self._EMB_weight
+
+    @EMB_weight.setter
+    def EMB_weight(self, EMB_weight):
+        self._EMB_weight = EMB_weight
+    
+    @property
+    def EDB_weight(self):
+        return self._EDB_weight
+    
+    @EDB_weight.setter
+    def EDB_weight(self, EDB_weight):
+        self._EDB_weight = EDB_weight
+
+    @property
+    def EZB_activation(self):
+        return self._EZB_activation
+
+    @EZB_activation.setter
+    def EZB_activation(self, EZB_activation):
+        self._EZB_activation = EZB_activation
+
+    @property
+    def EMB_activation(self):
+        return self._EMB_activation
+
+    @EMB_activation.setter
+    def EMB_activationt(self, EMB_activationt):
+        self._EMB_activationt = EMB_activationt
+
+    @property
+    def EDB_activation(self):
+        return self._EDB_activation
+
+    @EDB_activation.setter
+    def EDB_activationt(self, EDB_activationt):
+        self._EDB_activationt = EDB_activationt
+    
     @property
     def w_bit(self):
         return self._w_bit
@@ -646,6 +703,7 @@ class QConv2d(QModule):
             nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, inputs):
+        
         inputs, weight, bias = self._quantize(
             inputs=inputs, weight=self.weight, bias=self.bias
         )
