@@ -185,6 +185,15 @@ def get_stats_for_each_layer(non_quantized_dnn: torch.nn.Module) -> dict:
     """Get stats for each layer.
     The equivalent of getStatsForEachLayer in the Compensated DNN paper.
     """
+    
+    stats = []
+
+    for qlayer in qlayers(non_quantized_dnn):
+        weight_min = qlayer.weight().min().item()
+        weight_max = qlayer.weight().max().item()
+        value_dist = torch.historgram(input=qlayer.weight())
+
+    #return stats as a list?
     return dict()
 
 def identify_ib_and_fb_for_each_layer(non_quantized_dnn: torch.nn.Module, start_dict: dict) -> torch.nn.Module:
