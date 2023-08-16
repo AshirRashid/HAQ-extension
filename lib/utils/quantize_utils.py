@@ -231,8 +231,8 @@ class QModule(nn.Module, metaclass=ABCMeta):
         return self._EDB_activation
 
     @EDB_activation.setter
-    def EDB_activationt(self, EDB_activationt):
-        self._EDB_activationt = EDB_activationt
+    def EDB_activation(self, EDB_activationt):
+        self._EDB_activation = EDB_activationt
     
     @property
     def w_bit(self):
