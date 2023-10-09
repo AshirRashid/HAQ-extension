@@ -172,13 +172,19 @@ class QModule(nn.Module, metaclass=ABCMeta):
         self._trainable_activation_range = True
         self._calibrate = False
 
-        self._EZB_weight = 0
-        self._EMB_weight = 0
-        self._EDB_weight = 0
-
-        self._EZB_activation = 0
-        self._EMB_activation = 0
-        self._EDB_activation = 0
+        # Used in the compensated DNN approach implementation
+        self._use_compensated_dnn = False
+        self._initialize_compensated_dnn_attrs = False
+        self.fb_weight: int
+        self.fb_activation: int
+        self.ib_weight: int # TODO: also incorporate this
+        self.ib_activation: int # TODO: also incorporate this
+        self.ezb_weight: torch.Tensor
+        self.emb_weight: torch.Tensor
+        self.edb_weight: torch.Tensor
+        self.ezb_activation: torch.Tensor
+        self.emb_activation: torch.Tensor
+        self.edb_activation: torch.Tensor
 
     @property
     @abstractmethod
@@ -186,54 +192,15 @@ class QModule(nn.Module, metaclass=ABCMeta):
         pass
 
     @property
-    def EZB_weight(self):
-        return self._EZB_weight
-
-    
-    @EZB_weight.setter
-    def EZB_weight(self, EZB_weight):
-        self._EZB_weight = EZB_weight
-    
-    @property
-    def EMB_weight(self):
-        return self._EMB_weight
-
-    @EMB_weight.setter
-    def EMB_weight(self, EMB_weight):
-        self._EMB_weight = EMB_weight
-    
-    @property
-    def EDB_weight(self):
-        return self._EDB_weight
-    
-    @EDB_weight.setter
-    def EDB_weight(self, EDB_weight):
-        self._EDB_weight = EDB_weight
+    @abstractmethod
+    def est_weight(self):
+        pass
 
     @property
-    def EZB_activation(self):
-        return self._EZB_activation
+    @abstractmethod
+    def est_activation(self):
+        pass
 
-    @EZB_activation.setter
-    def EZB_activation(self, EZB_activation):
-        self._EZB_activation = EZB_activation
-
-    @property
-    def EMB_activation(self):
-        return self._EMB_activation
-
-    @EMB_activation.setter
-    def EMB_activationt(self, EMB_activationt):
-        self._EMB_activationt = EMB_activationt
-
-    @property
-    def EDB_activation(self):
-        return self._EDB_activation
-
-    @EDB_activation.setter
-    def EDB_activation(self, EDB_activationt):
-        self._EDB_activation = EDB_activationt
-    
     @property
     def w_bit(self):
         return self._w_bit
@@ -298,6 +265,9 @@ class QModule(nn.Module, metaclass=ABCMeta):
 
     def set_tanh(self, tanh=True):
         self._tanh_weight = tanh
+    
+    def set_compensated(self, use_compensated_dnn=True):
+        self._use_compensated_dnn = use_compensated_dnn
 
     def _compute_threshold(self, data, bitwidth):
         mn = 0
@@ -635,6 +605,27 @@ class QModule(nn.Module, metaclass=ABCMeta):
                 return STE.apply(ori_x, x)
         else:
             return weight
+    
+    def initialize_compensated_dnn_attrs(self, weight, inputs):
+        self.fb_weight = 8
+        self.fb_activation = 8
+        self.ezb_weight = torch.zeros(weight.shape)
+        self.emb_weight = torch.zeros(weight.shape)
+        self.edb_weight = torch.zeros(weight.shape)
+        self.est_weight = torch.zeros(weight.shape)
+        self.ezb_activation = torch.zeros(inputs.shape)
+        self.emb_activation = torch.zeros(inputs.shape)
+        self.edb_activation = torch.zeros(inputs.shape)
+        self.est_activation = torch.zeros(inputs.shape)
+
+    def calculate_est(self):
+        print(self.edb_activation)
+        self.est_activation = torch.pow(-1, self.edb_activation) * torch.pow(2, -self.fb_activation - 1 - self.emb_activation) # formula from compensated dnn paper section 4.2
+        self.est_weight = torch.pow(-1, self.edb_weight) * torch.pow(2, -self.fb_weight - 1 - self.emb_weight) # formula from compensated dnn paper section 4.2
+    
+    def cutoff_est(self):
+        self.est_activation = torch.where(self.est_activation < self.ezb_activation, 0, self.est_activation)
+        self.est_weight = torch.where(self.est_weight < self.ezb_weight, 0, self.est_weight)
 
     
 
@@ -689,11 +680,33 @@ class QConv2d(QModule):
 
     @property
     def weight(self):
+        if self._weight.get_device() != 0:
+            self._weight = self._weight.cuda()
         return self._weight
 
     @weight.setter
     def weight(self, weight):
         self._weight = weight
+
+    @property
+    def est_weight(self):
+        if self._est_weight.get_device() != 0:
+            self._est_weight = self._est_weight.cuda()
+        return self._est_weight
+
+    @est_weight.setter
+    def est_weight(self, est_weight):
+        self._est_weight = est_weight
+
+    @property
+    def est_activation(self):
+        if self._est_activation.get_device() != 0:
+            self._est_activation = self._est_activation.cuda()
+        return self._est_activation
+
+    @est_activation.setter
+    def est_activation(self, est_activation):
+        self._est_activation = est_activation
 
     def reset_parameters(self):
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
@@ -746,11 +759,33 @@ class QLinear(QModule):
 
     @property
     def weight(self):
+        if self._weight.get_device() != 0:
+            self._weight = self._weight.cuda()
         return self._weight
 
     @weight.setter
     def weight(self, weight):
         self._weight = weight
+
+    @property
+    def est_weight(self):
+        if self._est_weight.get_device() != 0:
+            self._est_weight = self._est_weight.cuda()
+        return self._est_weight
+
+    @est_weight.setter
+    def est_weight(self, est_weight):
+        self._est_weight = est_weight
+
+    @property
+    def est_activation(self):
+        if self._est_activation.get_device() != 0:
+            self._est_activation = self._est_activation.cuda()
+        return self._est_activation
+
+    @est_activation.setter
+    def est_activation(self, est_activation):
+        self._est_activation = est_activation
 
     def forward(self, inputs):
         inputs, weight, bias = self._quantize(
