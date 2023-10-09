@@ -112,14 +112,7 @@ if use_cuda:
     torch.cuda.manual_seed_all(args.manualSeed)
 
 
-best_acc = 0  # best test accuracy
-
-
 def test(val_loader, model, criterion, epoch=0, use_cuda=True):
-    global best_acc
-
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
@@ -128,12 +121,7 @@ def test(val_loader, model, criterion, epoch=0, use_cuda=True):
         # switch to evaluate mode
         model.eval()
 
-        end = time.time()
-        bar = Bar('Processing', max=len(val_loader))
         for batch_idx, (inputs, targets) in enumerate(val_loader):
-            # measure data loading time
-            data_time.update(time.time() - end)
-
             if use_cuda:
                 inputs, targets = inputs.cuda(), targets.cuda()
             inputs, targets = torch.autograd.Variable(inputs, volatile=True), torch.autograd.Variable(targets)
@@ -148,59 +136,35 @@ def test(val_loader, model, criterion, epoch=0, use_cuda=True):
             top1.update(prec1.item(), inputs.size(0))
             top5.update(prec5.item(), inputs.size(0))
 
-            # measure elapsed time
-            batch_time.update(time.time() - end)
-            end = time.time()
-
-            # plot progress
-            if batch_idx % 1 == 0:
-                bar.suffix  = \
-                    '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | ' \
-                    'Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
-                        batch=batch_idx + 1,
-                        size=len(val_loader),
-                        data=data_time.avg,
-                        bt=batch_time.avg,
-                        total=bar.elapsed_td,
-                        eta=bar.eta_td,
-                        loss=losses.avg,
-                        top1=top1.avg,
-                        top5=top5.avg,
-                        )
-                bar.next()
-        bar.finish()
     print(top1.avg)
     return losses.avg, top1.avg
 
 def qlayers(dnn: torch.nn.Module) -> Iterator[QModule]:
     """Returns a generator yielding all modules in dnn of type QLinear or QConv2d (i.e. quantizeable layers)
     """
-    return (module for module in dnn.modules() if type(module) in [QConv2d, QLinear])
+    return (module for _, module in dnn.named_modules() if type(module) in [QConv2d, QLinear])
 
 def evaluate_accuracy(dnn: torch.nn.Module) -> float:
-    _, accuracy: float = test(val_loader, dnn, criterion)
+    _, accuracy = test(val_loader, dnn, criterion)
     return accuracy
 
-def get_stats_for_each_layer(non_quantized_dnn: torch.nn.Module) -> dict:
+def get_stats_for_layer(qlayer: torch.nn.Module) -> dict:
     """Get stats for each layer.
-    The equivalent of getStatsForEachLayer in the Compensated DNN paper.
+    The equivalent of getStatsForEachLayer in the Compensated DNN paper, but only for one layer
+    TODO: fix this. get_stats_for_layer should also have access to the activations. This can only be done if it is used in the _quantize_activations
     """
-    
-    stats = []
+    return {
+        "weight_min": qlayer.weight().min().item(),
+        "weight_max": qlayer.weight().max().item(),
+        "value_dist": torch.historgram(input=qlayer.weight()),
+    }
 
-    for qlayer in qlayers(non_quantized_dnn):
-        weight_min = qlayer.weight().min().item()
-        weight_max = qlayer.weight().max().item()
-        value_dist = torch.historgram(input=qlayer.weight())
-
-    #return stats as a list?
-    return dict()
-
-def identify_ib_and_fb_for_each_layer(non_quantized_dnn: torch.nn.Module, start_dict: dict) -> torch.nn.Module:
+def identify_ib_and_fb_for_each_layer(non_quantized_dnn: torch.nn.Module) -> torch.nn.Module:
     """Sets the IB (integer bits) and FB (fractional bits) attributes of the model.
     This change quantizes the model since a fixed point representation is used to represent weights and activations.
     """
     for qlayer in qlayers(non_quantized_dnn):
+        stats_dict = get_stats_for_layer(qlayer)
         qlayer.ib = torch.full(qlayer.weight.shape, 4)
         qlayer.fb = torch.full(qlayer.weight.shape, 4)
     return non_quantized_dnn
@@ -217,32 +181,49 @@ def increase_error_sparsity(ezb_thresh, c_dnn) -> torch.nn.Module:
     The error is ignored by setting it to 0 so it is not taken into account
     """
     for qlayer in qlayers(c_dnn):
-        error_est = torch.pow(-1, qlayer.edb) * torch.pow(2, -qlayer.fb - 1 - qlayer.emb) # formula from compensated dnn paper section 4.2
-        qlayer.error_est = torch.where(error_est < ezb_thresh, 0, error_est) # error_est is to be used in the forward function later
+        qlayer.calculate_est()
+        qlayer.cutoff_est()
     return c_dnn
 
-def fpec_opt(self, non_quantized_dnn: torch.nn.Module, max_loss: float) -> torch.nn.Module:
+def fpec_opt(non_quantized_dnn: torch.nn.Module, max_loss: float) -> torch.nn.Module:
     # To check for quantizable layers, iterate over model.modules() and check if the type is QConv2d or QLinear.
     # TODO: extend the implementation to also work for activations in addition to weights
     EZB_THRESH_INC = 0.2 # ezb threshold increment
 
+    print("INITIAL ACCURACY, SET IB & FB")
     accuracy: float = evaluate_accuracy(non_quantized_dnn)
-    stats: dict = self.get_stats_for_each_layer(self.weight)
-    c_dnn: torch.nn.Module = identify_ib_and_fb_for_each_layer(non_quantized_dnn, stats) # Compensated dnn
-
-    # set emb = 0 for all weights
+    # c_dnn: torch.nn.Module = identify_ib_and_fb_for_each_layer(non_quantized_dnn) # Compensated dnn
     for qlayer in qlayers(non_quantized_dnn):
-        qlayer.emb = torch.zeros(qlayer.weight.shape)
-    c_dnn_temp: torch.nn.Module = deepcopy(c_dnn)
+        qlayer._initialize_compensated_dnn_attrs = True
+    print("FORWARD PASS FOR _initialize_compensated_dnn_attrs")
+    # print(id(next(qlayers(non_quantized_dnn))))
+    inputs, _ = next(iter(val_loader))
+    with torch.no_grad():
+        non_quantized_dnn(inputs)   # forward pass to run the _initialize_compensated_dnn_attrs logic in _quantize function
+    # print(id(next(qlayers(non_quantized_dnn))))
+                                    # initializes fb, ib & emb, ezb, edb for weights and activations
+    print("INITIALIZED")
+    # next(qlayers(non_quantized_dnn)).edb_activation = torch.tensor((10, 10))
+    breakpoint()
+    print(next(qlayers(non_quantized_dnn)).edb_activation)
+    for qlayer in qlayers(non_quantized_dnn):
+        qlayer._initialize_compensated_dnn_attrs = False
+        qlayer._use_compensated_dnn = True
+        qlayer.calculate_est()
+    c_dnn_temp: torch.nn.Module = deepcopy(non_quantized_dnn)
+    print("EMB & FB WHILE")
     while (accuracy - evaluate_accuracy(c_dnn_temp)) < max_loss:
         c_dnn = deepcopy(c_dnn_temp)
         while (accuracy - evaluate_accuracy(c_dnn_temp)) < max_loss:
             c_dnn = deepcopy(c_dnn_temp)
             for qlayer in qlayers(non_quantized_dnn):
-                qlayer.fb -= 1
+                qlayer.fb_weight -= 1
+                qlayer.fb_activation -= 1
         for qlayer in qlayers(non_quantized_dnn):
-            qlayer.emb += 1
+            qlayer.emb_weight += 1
+            qlayer.emb_activation += 1
     
+    print("EZB WHILE")
     ezb_thresh: float = set_default_ezb_thresh(c_dnn)
     while (accuracy - evaluate_accuracy(c_dnn_temp))< max_loss:
         c_dnn = deepcopy(c_dnn_temp)

@@ -524,10 +524,13 @@ class QModule(nn.Module, metaclass=ABCMeta):
             return bias
 
     def _quantize(self, inputs, weight, bias):
+        if self._initialize_compensated_dnn_attrs:
+            self.initialize_compensated_dnn_attrs(weight, inputs)
+            print("init run")
+            return inputs, weight, bias
+        print("non init run")
         inputs = self._quantize_activation(inputs=inputs)
         weight = self._quantize_weight(weight=weight)
-        # inputs = self._asymmetric_simple_activation(inputs=inputs)
-        # weight = self._asymmetric_simple_weights(inputs=weight)
         # bias = self._quantize_bias(bias=bias)
         return inputs, weight, bias
 
@@ -716,13 +719,27 @@ class QConv2d(QModule):
             nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, inputs):
-        
-        inputs, weight, bias = self._quantize(
-            inputs=inputs, weight=self.weight, bias=self.bias
-        )
-        return F.conv2d(
-            inputs, weight, bias, self.stride, self.padding, self.dilation, self.groups
-        )
+        if self._use_compensated_dnn:
+            self.w_bit = self.fb_weight
+            self.a_bit = self.fb_activation
+            inputs, weight, bias = self._quantize(
+                inputs=inputs, weight=self.weight, bias=self.bias
+            )
+            zero_bias = None
+            if bias != None:
+                zero_bias = torch.zeros(bias.shape)
+            # print(F.conv2d(inputs, weight, bias, self.stride, self.padding, self.dilation, self.groups).shape)
+            # print(F.conv2d(inputs, self.est_weight, zero_bias, self.stride, self.padding, self.dilation, self.groups).shape)
+            # print(F.conv2d(self.est_activation, weight, zero_bias, self.stride, self.padding, self.dilation, self.groups).shape)
+            return  F.conv2d(inputs, weight, bias, self.stride, self.padding, self.dilation, self.groups)\
+                    + F.conv2d(inputs, self.est_weight, zero_bias, self.stride, self.padding, self.dilation, self.groups)\
+                    + F.conv2d(self.est_activation, weight, zero_bias, self.stride, self.padding, self.dilation, self.groups)
+        else:
+            inputs, weight, bias = self._quantize( inputs=inputs, weight=self.weight, bias=self.bias
+            )
+            return F.conv2d(
+                inputs, weight, bias, self.stride, self.padding, self.dilation, self.groups
+            )
 
     def extra_repr(self):
         s = (
@@ -788,10 +805,20 @@ class QLinear(QModule):
         self._est_activation = est_activation
 
     def forward(self, inputs):
-        inputs, weight, bias = self._quantize(
-            inputs=inputs, weight=self.weight, bias=self.bias
-        )
-        return F.linear(inputs, weight=weight, bias=bias)
+        if self._use_compensated_dnn:
+            self.w_bit = self.fb_weight
+            self.a_bit = self.fb_activation
+            inputs, weight, bias = self._quantize(
+                inputs=inputs, weight=self.weight, bias=self.bias
+            )
+            return  F.linear(inputs, weight=weight, bias=bias)\
+                    + F.linear(inputs, weight=self.est_weight)\
+                    + F.linear(self.est_activation, weight=weight)
+        else:
+            inputs, weight, bias = self._quantize(
+                inputs=inputs, weight=self.weight, bias=self.bias
+            )
+            return F.linear(inputs, weight=weight, bias=bias)
 
     def reset_parameters(self):
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
