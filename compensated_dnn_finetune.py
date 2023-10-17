@@ -200,16 +200,13 @@ def fpec_opt(non_quantized_dnn: torch.nn.Module, max_loss: float) -> torch.nn.Mo
     inputs, _ = next(iter(val_loader))
     with torch.no_grad():
         non_quantized_dnn(inputs)   # forward pass to run the _initialize_compensated_dnn_attrs logic in _quantize function
-    # print(id(next(qlayers(non_quantized_dnn))))
                                     # initializes fb, ib & emb, ezb, edb for weights and activations
     print("INITIALIZED")
-    # next(qlayers(non_quantized_dnn)).edb_activation = torch.tensor((10, 10))
-    breakpoint()
-    print(next(qlayers(non_quantized_dnn)).edb_activation)
     for qlayer in qlayers(non_quantized_dnn):
         qlayer._initialize_compensated_dnn_attrs = False
         qlayer._use_compensated_dnn = True
         qlayer.calculate_est()
+
     c_dnn_temp: torch.nn.Module = deepcopy(non_quantized_dnn)
     print("EMB & FB WHILE")
     while (accuracy - evaluate_accuracy(c_dnn_temp)) < max_loss:
@@ -217,11 +214,11 @@ def fpec_opt(non_quantized_dnn: torch.nn.Module, max_loss: float) -> torch.nn.Mo
         while (accuracy - evaluate_accuracy(c_dnn_temp)) < max_loss:
             c_dnn = deepcopy(c_dnn_temp)
             for qlayer in qlayers(non_quantized_dnn):
-                qlayer.fb_weight -= 1
-                qlayer.fb_activation -= 1
+                qlayer.compensated_dnn_attrs.fb_weight -= 1
+                qlayer.compensated_dnn_attrs.fb_activation -= 1
         for qlayer in qlayers(non_quantized_dnn):
-            qlayer.emb_weight += 1
-            qlayer.emb_activation += 1
+            qlayer.compensated_dnn_attrs.emb_weight += 1
+            qlayer.compensated_dnn_attrs.emb_activation += 1
     
     print("EZB WHILE")
     ezb_thresh: float = set_default_ezb_thresh(c_dnn)

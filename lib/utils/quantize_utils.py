@@ -150,6 +150,23 @@ def kmeans_update_model(
         layer.weight.data = new_weight_data
 
 
+class CompesatedDnnAttrs:
+    """Container for all attributes required for the CompensatedDNN computations for error esimation
+    This is NOT an exhaustive list of attributes used in the implementation of the CommpensatedDNN paper
+    """
+    def initialize(self, inputs: torch.Tensor, weight: torch.Tensor):
+        self.fb_weight = 8
+        self.fb_activation = 8
+        self.ezb_weight = torch.zeros(weight.shape)
+        self.emb_weight = torch.zeros(weight.shape)
+        self.edb_weight = torch.zeros(weight.shape)
+        self.est_weight = torch.zeros(weight.shape)
+        self.ezb_activation = torch.zeros(inputs.shape)
+        self.emb_activation = torch.zeros(inputs.shape)
+        self.edb_activation = torch.zeros(inputs.shape)
+        self.est_activation = torch.zeros(inputs.shape)
+
+
 class QModule(nn.Module, metaclass=ABCMeta):
     def __init__(self, w_bit=-1, a_bit=-1, half_wave=True):
         super(QModule, self).__init__()
@@ -175,16 +192,7 @@ class QModule(nn.Module, metaclass=ABCMeta):
         # Used in the compensated DNN approach implementation
         self._use_compensated_dnn = False
         self._initialize_compensated_dnn_attrs = False
-        self.fb_weight: int
-        self.fb_activation: int
-        self.ib_weight: int # TODO: also incorporate this
-        self.ib_activation: int # TODO: also incorporate this
-        self.ezb_weight: torch.Tensor
-        self.emb_weight: torch.Tensor
-        self.edb_weight: torch.Tensor
-        self.ezb_activation: torch.Tensor
-        self.emb_activation: torch.Tensor
-        self.edb_activation: torch.Tensor
+        self.compensated_dnn_attrs: CompesatedDnnAttrs = CompesatedDnnAttrs()
 
     @property
     @abstractmethod
@@ -525,10 +533,8 @@ class QModule(nn.Module, metaclass=ABCMeta):
 
     def _quantize(self, inputs, weight, bias):
         if self._initialize_compensated_dnn_attrs:
-            self.initialize_compensated_dnn_attrs(weight, inputs)
-            print("init run")
+            self.compensated_dnn_attrs.initialize(inputs=inputs, weight=weight)
             return inputs, weight, bias
-        print("non init run")
         inputs = self._quantize_activation(inputs=inputs)
         weight = self._quantize_weight(weight=weight)
         # bias = self._quantize_bias(bias=bias)
@@ -608,27 +614,22 @@ class QModule(nn.Module, metaclass=ABCMeta):
                 return STE.apply(ori_x, x)
         else:
             return weight
-    
-    def initialize_compensated_dnn_attrs(self, weight, inputs):
-        self.fb_weight = 8
-        self.fb_activation = 8
-        self.ezb_weight = torch.zeros(weight.shape)
-        self.emb_weight = torch.zeros(weight.shape)
-        self.edb_weight = torch.zeros(weight.shape)
-        self.est_weight = torch.zeros(weight.shape)
-        self.ezb_activation = torch.zeros(inputs.shape)
-        self.emb_activation = torch.zeros(inputs.shape)
-        self.edb_activation = torch.zeros(inputs.shape)
-        self.est_activation = torch.zeros(inputs.shape)
 
     def calculate_est(self):
-        print(self.edb_activation)
-        self.est_activation = torch.pow(-1, self.edb_activation) * torch.pow(2, -self.fb_activation - 1 - self.emb_activation) # formula from compensated dnn paper section 4.2
-        self.est_weight = torch.pow(-1, self.edb_weight) * torch.pow(2, -self.fb_weight - 1 - self.emb_weight) # formula from compensated dnn paper section 4.2
+        self.est_activation = torch.pow(
+            -1, self.compensated_dnn_attrs.edb_activation) * torch.pow(2, -self.compensated_dnn_attrs.fb_activation - 1 - self.compensated_dnn_attrs.emb_activation
+        ) # formula from compensated dnn paper section 4.2
+        self.est_weight = torch.pow(
+            -1, self.compensated_dnn_attrs.edb_weight) * torch.pow(2, -self.compensated_dnn_attrs.fb_weight - 1 - self.compensated_dnn_attrs.emb_weight
+        ) # formula from compensated dnn paper section 4.2
     
     def cutoff_est(self):
-        self.est_activation = torch.where(self.est_activation < self.ezb_activation, 0, self.est_activation)
-        self.est_weight = torch.where(self.est_weight < self.ezb_weight, 0, self.est_weight)
+        self.compensated_dnn_attrs.est_activation = torch.where(
+            self.compensated_dnn_attrs.est_activation < self.compensated_dnn_attrs.ezb_activation, 0, self.compensated_dnn_attrs.est_activation
+            )
+        self.compensated_dnn_attrs.est_weight = torch.where(
+            self.compensated_dnn_attrs.est_weight < self.compensated_dnn_attrs.ezb_weight, 0, self.compensated_dnn_attrs.est_weight
+            )
 
     
 
